@@ -72,17 +72,12 @@ module Delayed
 
         def save
           set_default_run_at
-          self.queue = Delayed::Worker.default_queue_name if queue.nil? || queue.blank?
-          if self.locked_at.nil?
-            Delayed::Worker.etcd.put key, hash_representation.to_json
-          else
-            Delayed::Worker.etcd.put(worker_lock_name(locked_by), hash_representation.merge({:locked_by => locked_by, :locked_at => locked_at}).to_json)
-          end
+          Delayed::Worker.etcd.put key, hash_representation.to_json
           self
         end
 
-        def worker_lock_name(lock_name = Worker.name)
-          "locked_#{prefix}_#{lock_name}_#{id}"
+        def worker_lock_name
+          "#{prefix}_#{Worker.name}_lock_#{id}"
         end
 
         def save!
@@ -95,15 +90,16 @@ module Delayed
 
         def reload
           reset
-
           result = JSON.parse(Delayed::Worker.etcd.get(key).kvs.first.value).symbolize_keys
           self.priority = result[:priority].to_i
-          self.run_at = Time.at(result[:run_at])
-          self.locked_at = Time.at(result[:locked_at]) if result[:locked_at]
-          self.failed_at = Time.at(result[:failed_at]) if result[:failed_at]
-          self.last_error = result[:last_error]
+#          self.run_at = _run_at.nil? ? nil : Time.at(_run_at.to_i)
           self.queue = result[:queue]
-          self.attempts = result[:attempts]
+  #        self.handler = _payload_object||YAML.dump(nil)
+   #       self.failed_at = _failed_at.nil? ? nil : Time.at(_failed_at.to_i)
+    #      self.locked_at = _locked_at.nil? ? nil : Time.at(_locked_at.to_i)
+    #      self.locked_by = _locked_by
+        #  self.attempts = _attempts.to_i
+        #  self.last_error = _last_error
           self
         end
 
@@ -113,16 +109,15 @@ module Delayed
         end
 
         def self.get_worker_locks(worker_name)
-          Delayed::Worker.etcd.get("locked_#{prefix}_#{worker_name}", :range_end => "\0").kvs.select{ |kv| kv.key =~ Regexp.new("^locked_#{prefix}_#{worker_name}_") }
+          Delayed::Worker.etcd.get("#{prefix}_#{worker_name}", :range_end => "\0").kvs
         end
 
         def self.clear_locks!(worker_name)
           get_worker_locks(worker_name).each do |kv|
-            job = materialize(kv)
-            Delayed::Worker.etcd.del(job.worker_lock_name)
-            job.locked_by = nil
-            job.locked_at = nil
-            job.save
+            job = JSON.parse(Delayedi::Worker.etcd.get(kv.value).kvs.first.value).symbolize_keys
+            job.delete(:locked_by)
+            job.delete(:locked_at)
+            Delayed::Worker.etcd.put key, job.to_json
           end
         end
 
@@ -134,28 +129,17 @@ module Delayed
           new(hash)
         end
 
-        def fail!
-          #unlock job?
-        end
-
         def self.find_available(worker_name, limit = 5, max_run_time = Worker.max_run_time)
-          keys_to_search = Worker.queues.any? ? Worker.queues.map{ |queue| "#{prefix}_#{queue}" } : ["#{prefix}_#{Delayed::Worker.default_queue_name}"]
-          results = keys_to_search.map do |key|
-            Delayed::Worker.etcd.get(key, :range_end => "#{key}_#{Time.now.to_i}_9_1", :limit => limit, :sort_order => :ascend).kvs.map do |kv|
+          keys_to_search = Worker.queues.any? ? Worker.queues.map{ |queue| "#{prefix}_#{queue}_#{Time.now.to_i}_1" } : ["#{prefix}__#{Time.now.to_i}_1"]
+          keys_to_search.map do |key|
+            Delayed::Worker.etcd.get(prefix, :range_end => key, :limit => limit).kvs.map do |kv|
               materialize(kv)
             end
-          end.flatten[0..limit-1].select{|job| job.failed_at == nil && job.locked_at == nil}
-          if Delayed::Worker.min_priority || Delayed::Worker.max_priority
-            results.reject! do |job|
-              (job.priority < (Delayed::Worker.min_priority || -1*Float::INFINITY)) ||
-                (job.priority > (Delayed::Worker.max_priority || Float::INFINITY))
-            end
-          end
-          results
+          end.flatten[0..limit-1].select{|job| job.failed_at == nil }
         end
 
         def key
-         "#{prefix}_#{queue}_#{run_at.to_i}_#{priority}_#{id}"
+          "#{prefix}_#{queue}_#{run_at.to_i}_#{id}"
         end
 
         def lock_exclusively!(max_run_time, worker_name)
@@ -166,12 +150,14 @@ module Delayed
             ]
             txn.success = [
               Etcdserverpb::DeleteRangeRequest.new(key: key),
-              txn.put(worker_lock_name(worker_name), hash_representation.merge({:locked_by => worker_name, :locked_at => lock_time}).to_json)
+#              txn.del(key, key),
+              txn.put(worker_lock_name, hash_representation.merge({:locked_by => Worker.name, :locked_at => lock_time}).to_json)
             ]
           end
+          binding.pry
           if transaction_result.succeeded
-            self.locked_by = worker_name
-            self.locked_at = Time.at lock_time
+            locked_by = Worker.name
+            locked_at = lock_time
             return true
           else
             return false
