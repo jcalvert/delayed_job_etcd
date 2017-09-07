@@ -60,7 +60,7 @@ module Delayed
         def hash_representation
           keys = [:id, :priority, :run_at, :queue, :last_error,
                   :failed_at, :locked_at, :locked_by, :attempts]
-          keys.inject({:payload_object => handler}) do |hash, key|
+          keys.inject({:handler => handler}) do |hash, key|
               value = self.send(key)
               if !value.nil?
                 value = value.to_i if value.is_a?(Time)
@@ -93,10 +93,16 @@ module Delayed
           Delayed::Worker.etcd.del key
         end
 
-        def reload
+        def retrieve_hash(locker=nil)
+          key_to_use = locker.nil? ? key : worker_lock_name(locker)
+          JSON.parse(Delayed::Worker.etcd.get(key_to_use).kvs.first.value).symbolize_keys
+        end
+
+        #this isn't actually part of the interface, it is just used for testing - TODO FIX
+        def reload(locker=nil)
           reset
 
-          result = JSON.parse(Delayed::Worker.etcd.get(key).kvs.first.value).symbolize_keys
+          result = retrieve_hash(locker)
           self.priority = result[:priority].to_i
           self.run_at = Time.at(result[:run_at])
           self.locked_at = Time.at(result[:locked_at]) if result[:locked_at]
@@ -128,14 +134,17 @@ module Delayed
 
         def self.materialize(result)
           hash = JSON.parse(result.value)
-          hash["payload_object"] = YAML.load(hash["payload_object"])
+      #    binding.pry
+          #hash["payload_object"] = YAML.load(hash["payload_object"])
           hash["run_at"] = Time.at(hash["run_at"])
           hash[result.mod_revision]
           new(hash)
         end
 
         def fail!
-          #unlock job?
+          self.failed_at = Time.now
+          #TODO - attempts and retry policy?
+          self.save
         end
 
         def self.find_available(worker_name, limit = 5, max_run_time = Worker.max_run_time)
@@ -171,7 +180,7 @@ module Delayed
           end
           if transaction_result.succeeded
             self.locked_by = worker_name
-            self.locked_at = Time.at lock_time
+            self.locked_at = lock_time
             return true
           else
             return false
