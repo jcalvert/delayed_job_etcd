@@ -288,8 +288,10 @@ shared_examples_for 'a delayed_job backend' do
       Delayed::Worker.queue_attributes = {}
     end
 
+    #modified
     it 'fetches jobs ordered by priority' do
-      10.times { described_class.enqueue SimpleJob.new, :priority => rand(10) }
+      run_at = Time.now
+      10.times { described_class.enqueue SimpleJob.new, :priority => rand(10), :run_at => run_at }
       jobs = []
       10.times { jobs << described_class.reserve(worker) }
       expect(jobs.size).to eq(10)
